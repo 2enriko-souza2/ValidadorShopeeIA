@@ -1,17 +1,18 @@
 import os
 import sys
 import time
+import shutil
 import threading
 import winsound
 import xml.etree.ElementTree as ET
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from dao import PedidoDAO as database
 from service import XmlService as watcher
 from service import AuditoriaIAService
+from service import AgenteRAGService
 
 
 def tocar_som(tipo: str):
@@ -40,12 +41,13 @@ class ValidadorExpedicaoApp(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        self.title("Validador de Expedição + IA - Conferência Shopee / Bling")
-        self.geometry("1150x720")
-        self.minsize(900, 600)
+        self.title("Validador de Expedição + Agente RAG IA (XML / PDF) - Shopee / Bling")
+        self.geometry("1220x780")
+        self.minsize(960, 640)
 
         # Estado do modo Tela Cheia
         self.is_fullscreen = False
+        self.rag_em_execucao = False
 
         # Palette de Cores do Tema Escuro
         self.bg_color = "#1e1e2e"       # Fundo principal escuro
@@ -65,23 +67,24 @@ class ValidadorExpedicaoApp(tk.Tk):
         # Variável para rastrear hash do estado do banco
         self.last_db_state_hash = None
 
-        # Estilizar TTK
+        # Estilizar TTK (incluindo Abas / Notebook)
         self.setup_styles()
 
-        # Construir elementos gráficos
+        # Construir elementos gráficos (Abas 1 e 2)
         self.criar_interface()
 
         # Vinculação de teclas de atalho globais
         self.bind("<F11>", self.toggle_fullscreen)
         self.bind("<Escape>", self.exit_fullscreen)
 
-        # Atualizar dados iniciais
+        # Atualizar dados iniciais (Lote Ativo e Índice RAG XML/PDF)
         self.carregar_dados_lote_ativo()
+        self.atualizar_aba_rag_documentos()
 
         # Iniciar polling e sincronização periódica da UI (1s)
         self.checar_atualizacoes_db()
 
-        # Iniciar manutenção de foco automático contínuo no campo de bipagem
+        # Iniciar manutenção de foco automático contínuo no campo de bipagem (apenas na Aba 1)
         self.manter_foco_continuo()
 
         # Tentar conectar WebSocket em background se servidor estiver ativo
@@ -96,6 +99,27 @@ class ValidadorExpedicaoApp(tk.Tk):
         self.style.configure("Main.TFrame", background=self.bg_color)
         self.style.configure("Card.TFrame", background=self.card_bg, relief="flat")
 
+        # Estilo das Abas (Notebook)
+        self.style.configure(
+            "TNotebook",
+            background=self.bg_color,
+            borderwidth=0,
+            tabmargins=[2, 5, 2, 0]
+        )
+        self.style.configure(
+            "TNotebook.Tab",
+            background="#282a36",
+            foreground="#f8f8f2",
+            padding=[18, 8],
+            font=("Segoe UI", 11, "bold"),
+            borderwidth=0
+        )
+        self.style.map(
+            "TNotebook.Tab",
+            background=[("selected", "#6272a4"), ("active", "#44475a")],
+            foreground=[("selected", "#ffffff"), ("active", "#ffffff")]
+        )
+
         # Botões Customizados
         self.style.configure(
             "Primary.TButton",
@@ -106,6 +130,16 @@ class ValidadorExpedicaoApp(tk.Tk):
             borderwidth=0
         )
         self.style.map("Primary.TButton", background=[("active", "#6272a4")])
+
+        self.style.configure(
+            "Accent.TButton",
+            font=("Segoe UI", 10, "bold"),
+            background="#6272a4",
+            foreground="#ffffff",
+            padding=(12, 7),
+            borderwidth=0
+        )
+        self.style.map("Accent.TButton", background=[("active", "#bd93f9")])
 
         self.style.configure(
             "Danger.TButton",
@@ -137,7 +171,7 @@ class ValidadorExpedicaoApp(tk.Tk):
         self.style.map("Treeview.Heading", background=[("active", "#44475a")])
         self.style.map("Treeview", background=[("selected", "#44475a")], foreground=[("selected", "#ffffff")])
 
-        # Scrollbar escuro
+        # Scrollbars escuras
         self.style.configure(
             "Vertical.TScrollbar",
             gripcount=0,
@@ -160,13 +194,43 @@ class ValidadorExpedicaoApp(tk.Tk):
         )
 
     def criar_interface(self):
-        # Container Principal
-        main_container = ttk.Frame(self, style="Main.TFrame")
-        main_container.pack(fill="both", expand=True, padx=15, pady=15)
+        # Container Principal com Abas (Notebook)
+        root_container = ttk.Frame(self, style="Main.TFrame")
+        root_container.pack(fill="both", expand=True, padx=12, pady=10)
 
-        # ==============================================================================
+        self.notebook = ttk.Notebook(root_container)
+        self.notebook.pack(fill="both", expand=True)
+        self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
+
+        # Criar Aba 1 (Validador Operacional) e Aba 2 (Agente IA & Pesquisa RAG XML/PDF)
+        self.tab_operacao = ttk.Frame(self.notebook, style="Main.TFrame")
+        self.tab_agente_rag = ttk.Frame(self.notebook, style="Main.TFrame")
+
+        self.notebook.add(self.tab_operacao, text="📦 Conferência & Bipagem de Expedição")
+        self.notebook.add(self.tab_agente_rag, text="🤖 Agente IA & Pesquisa RAG (XML / PDF)")
+
+        self._construir_aba_operacao(self.tab_operacao)
+        self._construir_aba_agente_rag(self.tab_agente_rag)
+
+        # Barra de Status Inferior Global
+        self.statusbar = tk.Label(
+            root_container,
+            text="Sistema Pronto | SQLite + Motor RAG (XML/PDF) Operacionais | Pressione F11 para Tela Cheia | Esc para Sair",
+            font=("Segoe UI", 9),
+            bg=self.bg_color,
+            fg="#6272a4",
+            anchor="w"
+        )
+        self.statusbar.pack(fill="x", pady=(6, 0))
+
+    # ==============================================================================
+    # CONSTRUÇÃO DA ABA 1: CONFERÊNCIA & BIPAGEM
+    # ==============================================================================
+    def _construir_aba_operacao(self, parent_frame):
+        main_container = ttk.Frame(parent_frame, style="Main.TFrame")
+        main_container.pack(fill="both", expand=True, padx=8, pady=10)
+
         # 1. HEADER & BARRA DE AÇÕES
-        # ==============================================================================
         header_frame = ttk.Frame(main_container, style="Main.TFrame")
         header_frame.pack(fill="x", pady=(0, 12))
 
@@ -188,7 +252,6 @@ class ValidadorExpedicaoApp(tk.Tk):
         )
         self.lbl_lote_code.pack(side="left", padx=15)
 
-        # Botões de Ação na Direita
         btn_frame = ttk.Frame(header_frame, style="Main.TFrame")
         btn_frame.pack(side="right")
 
@@ -224,6 +287,14 @@ class ValidadorExpedicaoApp(tk.Tk):
         )
         self.btn_auditoria.pack(side="left", padx=4)
 
+        self.btn_ir_ia = ttk.Button(
+            btn_frame,
+            text="🤖 Abrir Agente RAG",
+            style="Accent.TButton",
+            command=lambda: self.notebook.select(self.tab_agente_rag)
+        )
+        self.btn_ir_ia.pack(side="left", padx=4)
+
         self.btn_fullscreen = ttk.Button(
             btn_frame,
             text="🖥️ Tela Cheia",
@@ -232,46 +303,38 @@ class ValidadorExpedicaoApp(tk.Tk):
         )
         self.btn_fullscreen.pack(side="left", padx=4)
 
-        # ==============================================================================
-        # 2. CARDS DE ESTATÍSTICAS (PROPORCIONAIS)
-        # ==============================================================================
+        # 2. CARDS DE ESTATÍSTICAS
         stats_frame = ttk.Frame(main_container, style="Main.TFrame")
         stats_frame.pack(fill="x", pady=(0, 12))
 
         for i in range(4):
             stats_frame.columnconfigure(i, weight=1, uniform="stat_card")
 
-        # Card 1: Total de Notas
         card1 = tk.Frame(stats_frame, bg=self.card_bg, highlightbackground=self.card_border, highlightthickness=1)
         card1.grid(row=0, column=0, padx=4, sticky="ew")
         tk.Label(card1, text="Total de Notas", font=("Segoe UI", 10, "bold"), bg=self.card_bg, fg="#8be9fd").pack(pady=(8, 2))
         self.lbl_card_total = tk.Label(card1, text="0", font=("Segoe UI", 20, "bold"), bg=self.card_bg, fg="#ffffff")
         self.lbl_card_total.pack(pady=(0, 8))
 
-        # Card 2: 🔴 Não Bipadas
         card2 = tk.Frame(stats_frame, bg=self.card_bg, highlightbackground=self.card_border, highlightthickness=1)
         card2.grid(row=0, column=1, padx=4, sticky="ew")
         tk.Label(card2, text="🔴 Não Bipadas", font=("Segoe UI", 10, "bold"), bg=self.card_bg, fg="#ff5555").pack(pady=(8, 2))
         self.lbl_card_nao_bipadas = tk.Label(card2, text="0", font=("Segoe UI", 20, "bold"), bg=self.card_bg, fg="#ff5555")
         self.lbl_card_nao_bipadas.pack(pady=(0, 8))
 
-        # Card 3: 🟡 Em Separação
         card3 = tk.Frame(stats_frame, bg=self.card_bg, highlightbackground=self.card_border, highlightthickness=1)
         card3.grid(row=0, column=2, padx=4, sticky="ew")
         tk.Label(card3, text="🟡 Em Separação", font=("Segoe UI", 10, "bold"), bg=self.card_bg, fg="#f1fa8c").pack(pady=(8, 2))
         self.lbl_card_em_separacao = tk.Label(card3, text="0", font=("Segoe UI", 20, "bold"), bg=self.card_bg, fg="#f1fa8c")
         self.lbl_card_em_separacao.pack(pady=(0, 8))
 
-        # Card 4: 🟢 Prontas para Coleta
         card4 = tk.Frame(stats_frame, bg=self.card_bg, highlightbackground=self.card_border, highlightthickness=1)
         card4.grid(row=0, column=3, padx=4, sticky="ew")
         tk.Label(card4, text="🟢 Prontas para Coleta", font=("Segoe UI", 10, "bold"), bg=self.card_bg, fg="#50fa7b").pack(pady=(8, 2))
         self.lbl_card_pronto_coleta = tk.Label(card4, text="0", font=("Segoe UI", 20, "bold"), bg=self.card_bg, fg="#50fa7b")
         self.lbl_card_pronto_coleta.pack(pady=(0, 8))
 
-        # ==============================================================================
         # 3. CAMPO DE BIPAGEM DE ALTA VISIBILIDADE
-        # ==============================================================================
         bip_box = tk.Frame(main_container, bg=self.card_bg, highlightbackground="#6272a4", highlightthickness=2, bd=0)
         bip_box.pack(fill="x", pady=(0, 12), ipady=4)
 
@@ -298,7 +361,6 @@ class ValidadorExpedicaoApp(tk.Tk):
         self.entry_bip.pack(fill="x", padx=15, pady=(0, 8))
         self.entry_bip.bind("<Return>", self.processar_bip)
 
-        # Banner de Feedback Visual da Bipagem
         self.lbl_feedback = tk.Label(
             bip_box,
             text="Aguardando bipagem... (Foco automático ativo)",
@@ -309,9 +371,7 @@ class ValidadorExpedicaoApp(tk.Tk):
         )
         self.lbl_feedback.pack(fill="x", padx=15, pady=(0, 6))
 
-        # ==============================================================================
-        # 4. TABELA DINÂMICA DE PEDIDOS (TREEVIEW PERMANENTE)
-        # ==============================================================================
+        # 4. TABELA DINÂMICA DE PEDIDOS
         table_container = ttk.Frame(main_container, style="Main.TFrame")
         table_container.pack(fill="both", expand=True)
 
@@ -353,12 +413,10 @@ class ValidadorExpedicaoApp(tk.Tk):
         self.tree.column("data_importacao", width=160, minwidth=120, anchor="center")
         self.tree.column("ultimo_bip", width=160, minwidth=120, anchor="center")
 
-        # Configurar tags de cores para a tabela
         self.tree.tag_configure("nao_bipado", foreground="#ff5555")
         self.tree.tag_configure("em_separacao", foreground="#f1fa8c")
         self.tree.tag_configure("pronto_coleta", foreground="#50fa7b")
 
-        # Scrollbars
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview, style="Vertical.TScrollbar")
         self.tree.configure(yscrollcommand=vsb.set)
 
@@ -369,31 +427,402 @@ class ValidadorExpedicaoApp(tk.Tk):
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
 
-        # ==============================================================================
-        # BARRA DE STATUS INFERIOR
-        # ==============================================================================
-        self.statusbar = tk.Label(
-            main_container,
-            text="Sistema Pronto | SQLite Operacional | Pressione F11 para Tela Cheia | Esc para Sair",
-            font=("Segoe UI", 9),
+    # ==============================================================================
+    # CONSTRUÇÃO DA ABA 2: AGENTE IA & PESQUISA RAG (XML / PDF)
+    # ==============================================================================
+    def _construir_aba_agente_rag(self, parent_frame):
+        rag_container = ttk.Frame(parent_frame, style="Main.TFrame")
+        rag_container.pack(fill="both", expand=True, padx=8, pady=10)
+
+        # 1. Header da Aba RAG
+        rag_header = ttk.Frame(rag_container, style="Main.TFrame")
+        rag_header.pack(fill="x", pady=(0, 10))
+
+        tk.Label(
+            rag_header,
+            text="🤖 Agente IA & Leitor RAG de Notas Fiscais (XML / PDF)",
+            font=("Segoe UI", 15, "bold"),
             bg=self.bg_color,
-            fg="#6272a4",
-            anchor="w"
+            fg="#bd93f9"
+        ).pack(side="left")
+
+        self.lbl_rag_status = tk.Label(
+            rag_header,
+            text="📚 Base RAG: Carregando...",
+            font=("Segoe UI", 10, "italic"),
+            bg=self.bg_color,
+            fg="#8be9fd"
         )
-        self.statusbar.pack(fill="x", pady=(6, 0))
+        self.lbl_rag_status.pack(side="left", padx=15)
+
+        rag_btns = ttk.Frame(rag_header, style="Main.TFrame")
+        rag_btns.pack(side="right")
+
+        ttk.Button(
+            rag_btns,
+            text="📄 Importar XML / PDF p/ Pasta",
+            style="Primary.TButton",
+            command=self.importar_arquivos_rag
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            rag_btns,
+            text="🔄 Reindexar Pasta XML / PDF",
+            style="Accent.TButton",
+            command=self.atualizar_aba_rag_documentos
+        ).pack(side="left", padx=4)
+
+        # 2. Tabela de Notas Extraídas da Pasta de Importação (XML / PDF)
+        lbl_tbl_rag = tk.Label(
+            rag_container,
+            text="📂 Notas Fiscais Extraídas da Pasta de Importação (Clique em uma nota para ver a ficha completa):",
+            font=("Segoe UI", 10, "bold"),
+            bg=self.bg_color,
+            fg="#f8f8f2"
+        )
+        lbl_tbl_rag.pack(anchor="w", pady=(0, 4))
+
+        rag_table_frame = ttk.Frame(rag_container, style="Main.TFrame")
+        rag_table_frame.pack(fill="both", expand=True, pady=(0, 10))
+        rag_table_frame.rowconfigure(0, weight=1)
+        rag_table_frame.columnconfigure(0, weight=1)
+
+        cols_rag = ("numero_nf", "cliente", "produto_veiculo", "valor", "hora_pasta", "status", "arquivo")
+        self.tree_rag = ttk.Treeview(
+            rag_table_frame,
+            columns=cols_rag,
+            show="headings",
+            style="Treeview",
+            height=6,
+            selectmode="browse"
+        )
+
+        self.tree_rag.heading("numero_nf", text="Nº Nota (NF)")
+        self.tree_rag.heading("cliente", text="Nome do Cliente / Destinatário")
+        self.tree_rag.heading("produto_veiculo", text="Produto / Item / Veículo Vendido")
+        self.tree_rag.heading("valor", text="Valor Total")
+        self.tree_rag.heading("hora_pasta", text="Hora Adicionado na Pasta")
+        self.tree_rag.heading("status", text="Status Bipagem")
+        self.tree_rag.heading("arquivo", text="Arquivo (XML/PDF)")
+
+        self.tree_rag.column("numero_nf", width=95, anchor="center")
+        self.tree_rag.column("cliente", width=220, anchor="w")
+        self.tree_rag.column("produto_veiculo", width=360, anchor="w")
+        self.tree_rag.column("valor", width=95, anchor="center")
+        self.tree_rag.column("hora_pasta", width=155, anchor="center")
+        self.tree_rag.column("status", width=170, anchor="w")
+        self.tree_rag.column("arquivo", width=180, anchor="w")
+
+        self.tree_rag.tag_configure("nao_bipado", foreground="#ff5555")
+        self.tree_rag.tag_configure("em_separacao", foreground="#f1fa8c")
+        self.tree_rag.tag_configure("pronto_coleta", foreground="#50fa7b")
+
+        vsb_r = ttk.Scrollbar(rag_table_frame, orient="vertical", command=self.tree_rag.yview, style="Vertical.TScrollbar")
+        hsb_r = ttk.Scrollbar(rag_table_frame, orient="horizontal", command=self.tree_rag.xview, style="Horizontal.TScrollbar")
+        self.tree_rag.configure(yscrollcommand=vsb_r.set, xscrollcommand=hsb_r.set)
+
+        self.tree_rag.grid(row=0, column=0, sticky="nsew")
+        vsb_r.grid(row=0, column=1, sticky="ns")
+        hsb_r.grid(row=1, column=0, sticky="ew")
+
+        self.tree_rag.bind("<<TreeviewSelect>>", self.on_selecionar_nota_rag)
+
+        # 3. Painel de Chat e Consultas Rápidas do Agente IA + RAG
+        chat_card = tk.Frame(
+            rag_container,
+            bg=self.card_bg,
+            highlightbackground="#bd93f9",
+            highlightthickness=2,
+            bd=0
+        )
+        chat_card.pack(fill="both", expand=True)
+
+        # Barra de Botões de 1 Clique para o Agente
+        quick_bar = tk.Frame(chat_card, bg=self.card_bg)
+        quick_bar.pack(fill="x", padx=12, pady=(8, 6))
+
+        tk.Label(
+            quick_bar,
+            text="⚡ Consultas Rápidas IA:",
+            font=("Segoe UI", 10, "bold"),
+            bg=self.card_bg,
+            fg="#8be9fd"
+        ).pack(side="left", padx=(0, 8))
+
+        ttk.Button(
+            quick_bar,
+            text="🧾 Listar Todas (Nº NF, Cliente, Produto/Veículo e Hora)",
+            style="Accent.TButton",
+            command=lambda: self.executar_pergunta_rag(
+                "Liste todas as notas fiscais da pasta informando: Número da Nota, Nome do Cliente, "
+                "Produto/Veículo que foi vendido, Valor e a Hora em que foi adicionado na pasta de importação.",
+                usar_llm=False
+            )
+        ).pack(side="left", padx=3)
+
+        ttk.Button(
+            quick_bar,
+            text="🔴 Não Bipadas",
+            style="Primary.TButton",
+            command=lambda: self.executar_pergunta_rag(
+                "Quais notas fiscais ainda não foram bipadas? Mostre número da nota, cliente, item/veículo vendido e hora de importação.",
+                usar_llm=False
+            )
+        ).pack(side="left", padx=3)
+
+        ttk.Button(
+            quick_bar,
+            text="🟢 Já Bipadas",
+            style="Primary.TButton",
+            command=lambda: self.executar_pergunta_rag(
+                "Quais notas fiscais já foram bipadas? Mostre número da nota, cliente, item/veículo vendido e horários de bipagem.",
+                usar_llm=False
+            )
+        ).pack(side="left", padx=3)
+
+        ttk.Button(
+            quick_bar,
+            text="📊 Diagnóstico IA Completo",
+            style="Primary.TButton",
+            command=lambda: self.executar_pergunta_rag(
+                "Faça um diagnóstico completo de todas as notas importadas: resumo do lote, clientes, "
+                "produtos/veículos vendidos, horários de entrada na pasta e status de bipagem.",
+                usar_llm=True
+            )
+        ).pack(side="left", padx=3)
+
+        # Campo de Pergunta Livre ao Agente RAG
+        ask_bar = tk.Frame(chat_card, bg=self.card_bg)
+        ask_bar.pack(fill="x", padx=12, pady=(2, 8))
+
+        self.entry_rag_query = tk.Entry(
+            ask_bar,
+            font=("Segoe UI", 11),
+            bg="#191622",
+            fg="#50fa7b",
+            insertbackground="#ffffff",
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground="#6272a4",
+            bd=5
+        )
+        self.entry_rag_query.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.entry_rag_query.insert(
+            0,
+            "Pesquise por Nº da Nota, Nome do Cliente, Produto/Veículo vendido ou pergunte ao Agente IA..."
+        )
+        self.entry_rag_query.bind("<FocusIn>", self._limpar_placeholder_aba_rag)
+        self.entry_rag_query.bind("<Return>", lambda e: self.enviar_pergunta_aba_rag())
+
+        ttk.Button(
+            ask_bar,
+            text="🤖 Perguntar ao Agente RAG",
+            style="Accent.TButton",
+            command=self.enviar_pergunta_aba_rag
+        ).pack(side="right")
+
+        # Área de Resposta do Agente RAG
+        resp_frame = tk.Frame(chat_card, bg=self.card_bg)
+        resp_frame.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+
+        self.txt_rag_output = tk.Text(
+            resp_frame,
+            height=11,
+            font=("Consolas", 10),
+            bg="#191622",
+            fg="#f8f8f2",
+            insertbackground="#ffffff",
+            relief="flat",
+            wrap="word",
+            padx=10,
+            pady=8,
+            state="disabled"
+        )
+        vsb_out = ttk.Scrollbar(resp_frame, orient="vertical", command=self.txt_rag_output.yview, style="Vertical.TScrollbar")
+        self.txt_rag_output.configure(yscrollcommand=vsb_out.set)
+
+        self.txt_rag_output.pack(side="left", fill="both", expand=True)
+        vsb_out.pack(side="right", fill="y")
+
+    # ==============================================================================
+    # LÓGICA DA ABA 2 (AGENTE IA & RAG XML / PDF)
+    # ==============================================================================
+    def _limpar_placeholder_aba_rag(self, event=None):
+        txt = self.entry_rag_query.get()
+        if txt.startswith("Pesquise por Nº da Nota"):
+            self.entry_rag_query.delete(0, tk.END)
+
+    def _escrever_saida_rag(self, texto: str, cor: str = "#50fa7b"):
+        self.txt_rag_output.configure(state="normal", fg=cor)
+        self.txt_rag_output.delete("1.0", tk.END)
+        self.txt_rag_output.insert(tk.END, texto)
+        self.txt_rag_output.configure(state="disabled")
+
+    def atualizar_aba_rag_documentos(self):
+        """Reindexa a pasta xml_entrada (e processados) e preenche a tabela RAG."""
+        try:
+            docs = AgenteRAGService.indice_rag.indexar_tudo()
+            self.lbl_rag_status.configure(
+                text=f"📚 Base RAG Indexada: {len(docs)} documento(s) (XML/PDF)"
+            )
+
+            children = self.tree_rag.get_children()
+            self.tree_rag.delete(*children)
+
+            self._mapa_docs_rag = {}
+
+            for idx, d in enumerate(docs, start=1):
+                iid = str(d["chave"])
+                self._mapa_docs_rag[iid] = d
+                st = d["status_raw"]
+                tag = (
+                    "nao_bipado" if st == "NAO_BIPADO"
+                    else "em_separacao" if st == "EM_SEPARACAO"
+                    else "pronto_coleta" if st == "PRONTO_COLETA"
+                    else ""
+                )
+                self.tree_rag.insert(
+                    "",
+                    "end",
+                    iid=iid,
+                    values=(
+                        d["numero_nf"],
+                        d["cliente_nome"],
+                        d["produto_veiculo_vendido"],
+                        f"R$ {d['valor_total_nf']}",
+                        d["hora_adicionado_pasta"],
+                        d["status_fmt"],
+                        f"{d['nome_arquivo']} ({d['tipo_arquivo']})"
+                    ),
+                    tags=(tag,)
+                )
+
+            # Exibir automaticamente o resumo das notas indexadas na abertura
+            if docs and not self.rag_em_execucao:
+                resumo = AgenteRAGService.consultar_agente_rag(
+                    "Liste todas as notas fiscais da pasta informando número da nota, cliente, item/veículo vendido e hora",
+                    usar_llm_externo=False
+                )
+                self._escrever_saida_rag(resumo, cor="#50fa7b")
+            elif not docs:
+                self._escrever_saida_rag(
+                    "📂 Nenhum arquivo XML ou PDF encontrado na pasta 'xml_entrada'.\n"
+                    "Clique em '📄 Importar XML / PDF p/ Pasta' para adicionar notas fiscais.",
+                    cor="#f1fa8c"
+                )
+        except Exception as e:
+            self._escrever_saida_rag(f"Erro ao indexar pasta RAG: {e}", cor="#ff5555")
+
+    def on_selecionar_nota_rag(self, event=None):
+        sel = self.tree_rag.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        doc = getattr(self, "_mapa_docs_rag", {}).get(iid)
+        if not doc:
+            return
+
+        ficha = (
+            "🔎 [FICHA DETALHADA DA NOTA FISCAL — EXTRAÇÃO RAG (XML / PDF)]\n"
+            + ("═" * 75) + "\n\n"
+            + AgenteRAGService.formatar_ficha_nota(doc)
+        )
+        if doc.get("cliente_endereco") and doc.get("cliente_endereco") != "-":
+            ficha += f"\n   📍 Endereço Completo      : {doc['cliente_endereco']}"
+        if doc.get("emitente_nome") and doc.get("emitente_nome") != "-":
+            ficha += f"\n   🏢 Emitente da Nota       : {doc['emitente_nome']} ({doc['emitente_fantasia']}) — CNPJ: {doc['emitente_cnpj']}"
+
+        self._escrever_saida_rag(ficha, cor="#8be9fd")
+
+    def enviar_pergunta_aba_rag(self):
+        pergunta = self.entry_rag_query.get().strip()
+        if not pergunta or pergunta.startswith("Pesquise por Nº da Nota"):
+            pergunta = "Liste todas as notas com número da nota, nome do cliente, produto/veículo vendido e hora de adição na pasta."
+        self.executar_pergunta_rag(pergunta, usar_llm=True)
+
+    def executar_pergunta_rag(self, pergunta: str, usar_llm: bool = True):
+        if self.rag_em_execucao:
+            return
+        self.rag_em_execucao = True
+        self._escrever_saida_rag(
+            f"⏳ Agente RAG pesquisando nos arquivos XML/PDF e analisando sua solicitação...\n"
+            f"Pergunta: \"{pergunta}\"",
+            cor="#f1fa8c"
+        )
+
+        def _worker():
+            try:
+                resp = AgenteRAGService.consultar_agente_rag(pergunta=pergunta, usar_llm_externo=usar_llm)
+                self.after(0, lambda: self._finalizar_execucao_rag(resp, "#50fa7b"))
+            except Exception as e:
+                self.after(0, lambda: self._finalizar_execucao_rag(f"❌ Erro no Agente RAG: {e}", "#ff5555"))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _finalizar_execucao_rag(self, texto: str, cor: str):
+        self.rag_em_execucao = False
+        self._escrever_saida_rag(texto, cor=cor)
+
+    def importar_arquivos_rag(self):
+        """Permite selecionar arquivos XML ou PDF e copiá-los para a pasta de importação do RAG."""
+        arquivos = filedialog.askopenfilenames(
+            title="Selecione arquivos XML ou PDF de Notas Fiscais",
+            filetypes=[("Notas Fiscais (XML / PDF)", "*.xml *.pdf"), ("Arquivos XML", "*.xml"), ("Arquivos PDF", "*.pdf")]
+        )
+        if not arquivos:
+            return
+
+        pasta_entrada = os.path.join(database.BASE_DIR, "xml_entrada")
+        os.makedirs(pasta_entrada, exist_ok=True)
+
+        copiados = 0
+        for arq in arquivos:
+            try:
+                nome = os.path.basename(arq)
+                destino = os.path.join(pasta_entrada, nome)
+                if os.path.abspath(arq) != os.path.abspath(destino):
+                    shutil.copy2(arq, destino)
+                copiados += 1
+            except Exception as e:
+                print(f"Erro ao copiar {arq}: {e}")
+
+        # Processar XMLs novos para o lote ativo também
+        watcher.processar_pasta_existente()
+        self.carregar_dados_lote_ativo()
+        self.atualizar_aba_rag_documentos()
+        messagebox.showinfo(
+            "Importação RAG Concluída",
+            f"✅ {copiados} arquivo(s) (XML/PDF) importado(s) e indexado(s) no motor RAG com sucesso!"
+        )
 
     # ==============================================================================
     # LÓGICA DE FOCO AUTOMÁTICO E TECLAS DE ATALHO
     # ==============================================================================
-    def manter_foco_continuo(self):
-        """Redireciona o foco para o campo de bipagem se o usuário não estiver em outro campo editável."""
+    def on_tab_changed(self, event=None):
+        """Quando o usuário troca de aba, atualiza o RAG ou devolve o foco ao leitor de código de barras."""
         try:
-            focused = self.focus_get()
-            if focused != self.entry_bip and focused is not None:
-                if not isinstance(focused, (tk.Entry, ttk.Entry, tk.Text)):
-                    self.entry_bip.focus_set()
-            elif focused is None:
+            aba_atual = self.notebook.select()
+            if str(aba_atual) == str(self.tab_operacao):
                 self.entry_bip.focus_set()
+            else:
+                self.atualizar_aba_rag_documentos()
+        except Exception:
+            pass
+
+    def manter_foco_continuo(self):
+        """
+        Redireciona o foco para o campo de bipagem APENAS quando a Aba 1 (Operação) estiver ativa
+        e o usuário não estiver em outro campo editável.
+        """
+        try:
+            aba_atual = self.notebook.select()
+            if str(aba_atual) == str(self.tab_operacao):
+                focused = self.focus_get()
+                if focused != self.entry_bip and focused is not None:
+                    if not isinstance(focused, (tk.Entry, ttk.Entry, tk.Text)):
+                        self.entry_bip.focus_set()
+                elif focused is None:
+                    self.entry_bip.focus_set()
         except Exception:
             pass
 
@@ -408,24 +837,19 @@ class ValidadorExpedicaoApp(tk.Tk):
         else:
             self.btn_fullscreen.configure(text="🖥️ Tela Cheia")
 
-        self.entry_bip.focus_set()
-
     def exit_fullscreen(self, event=None):
         if self.is_fullscreen:
             self.is_fullscreen = False
             self.attributes("-fullscreen", False)
             self.btn_fullscreen.configure(text="🖥️ Tela Cheia")
-            self.entry_bip.focus_set()
 
     # ==============================================================================
-    # ATUALIZAÇÃO DA INTERFACE E CARREGAMENTO DE DADOS
+    # ATUALIZAÇÃO DA INTERFACE E CARREGAMENTO DE DADOS (ABA 1)
     # ==============================================================================
     def calcular_hash_estado(self, pedidos):
-        """Gera uma assinatura hash do estado atual dos pedidos no lote."""
         return "|".join(f"{p['id']}:{p['status']}:{p.get('data_bip_separacao')}:{p.get('data_bip_coleta')}" for p in pedidos)
 
     def carregar_dados_lote_ativo(self):
-        """Consulta o banco SQLite e atualiza os cards, o lote ativo e a Treeview."""
         try:
             dados_lote = database.listar_pedidos_lote_ativo()
 
@@ -433,20 +857,16 @@ class ValidadorExpedicaoApp(tk.Tk):
             estatisticas = dados_lote["estatisticas"]
             pedidos = dados_lote["pedidos"]
 
-            # Atualizar hash para evitar atualizações redundantes da tabela
             hash_atual = f"{lote_info['id']}_" + self.calcular_hash_estado(pedidos)
             self.last_db_state_hash = hash_atual
 
-            # Atualizar Header do Lote
             self.lbl_lote_code.configure(text=f"Lote Ativo: {lote_info['codigo']} (ID: {lote_info['id']})")
 
-            # Atualizar Cards de Estatísticas
             self.lbl_card_total.configure(text=str(estatisticas["total"]))
             self.lbl_card_nao_bipadas.configure(text=str(estatisticas["nao_bipados"]))
             self.lbl_card_em_separacao.configure(text=str(estatisticas["em_separacao"]))
             self.lbl_card_pronto_coleta.configure(text=str(estatisticas["pronto_coleta"]))
 
-            # Atualizar Treeview mantendo todas as notas visíveis permanentemente
             children = self.tree.get_children()
             self.tree.delete(*children)
 
@@ -490,7 +910,6 @@ class ValidadorExpedicaoApp(tk.Tk):
             print(f"Erro ao carregar dados do lote ativo: {e}")
 
     def checar_atualizacoes_db(self):
-        """Verifica se novos XMLs ou bips foram registrados no banco de dados."""
         try:
             dados_lote = database.listar_pedidos_lote_ativo()
             pedidos = dados_lote["pedidos"]
@@ -499,13 +918,13 @@ class ValidadorExpedicaoApp(tk.Tk):
 
             if hash_novo != self.last_db_state_hash:
                 self.carregar_dados_lote_ativo()
+                self.atualizar_aba_rag_documentos()
         except Exception:
             pass
         finally:
             self.after(1000, self.checar_atualizacoes_db)
 
     def iniciar_websocket_listener(self):
-        """Thread secundária para escutar o WebSocket do servidor se estiver ativo."""
         def _ws_worker():
             try:
                 import websockets
@@ -545,7 +964,6 @@ class ValidadorExpedicaoApp(tk.Tk):
         resultado = res["resultado"]
         mensagem = res["mensagem"]
 
-        # Atualizar Alerta Sonoro e Banner de Feedback Visual
         if resultado in ("SUCESSO_SEPARACAO", "SUCESSO_COLETA"):
             tocar_som("SUCESSO")
             self.lbl_feedback.configure(
@@ -577,21 +995,20 @@ class ValidadorExpedicaoApp(tk.Tk):
         self.entry_bip.focus_set()
 
     def sincronizar_pasta_entrada(self):
-        """Varre manualmente a pasta de entrada (xml_entrada) para importar XMLs novos."""
         try:
             res = watcher.processar_pasta_existente()
             self.carregar_dados_lote_ativo()
+            self.atualizar_aba_rag_documentos()
 
             inseridos = res.get("inseridos", 0)
             duplicados = res.get("duplicados", 0)
-            totais = res.get("totais", 0)
 
             if inseridos > 0:
                 tocar_som("SUCESSO")
                 msg_txt = f"✅ {inseridos} novo(s) arquivo(s) XML importado(s) com sucesso!"
                 if duplicados > 0:
                     msg_txt += f"\n⚠️ {duplicados} arquivo(s) já existia(m) no lote atual."
-                
+
                 self.lbl_feedback.configure(
                     text=f"🔄 Sincronização: {inseridos} nova(s) nota(s) adicionada(s)!",
                     bg="#1b4b27",
@@ -605,14 +1022,14 @@ class ValidadorExpedicaoApp(tk.Tk):
                     bg="#4a4215",
                     fg="#f1fa8c"
                 )
-                messagebox.showinfo("Sincronização", f"⚠️ O(s) {duplicados} arquivo(s) XML localizado(s) já haviam sido importado(s) para o lote ativo atual.\n\nEles foram movidos para a pasta 'xml_entrada/processados'.")
+                messagebox.showinfo("Sincronização", f"⚠️ O(s) {duplicados} arquivo(s) XML localizado(s) já haviam sido importado(s) para o lote ativo atual.")
             else:
                 self.lbl_feedback.configure(
                     text="🔄 Sincronização: Nenhum arquivo XML pendente na pasta xml_entrada.",
                     bg="#282a36",
                     fg="#bd93f9"
                 )
-                messagebox.showinfo("Sincronização", "Nenhum arquivo XML pendente foi encontrado na pasta 'xml_entrada'.\n\nColoque novos arquivos .xml na pasta e clique em Sincronizar novamente.")
+                messagebox.showinfo("Sincronização", "Nenhum arquivo XML pendente foi encontrado na pasta 'xml_entrada'.")
         except Exception as e:
             messagebox.showerror("Erro de Sincronização", f"Erro ao varrer pasta de entrada: {e}")
         finally:
@@ -662,6 +1079,9 @@ class ValidadorExpedicaoApp(tk.Tk):
         lote_ativo = database.obter_ou_criar_lote_ativo()
         lote_id = lote_ativo["id"]
 
+        pasta_proc = os.path.join(database.BASE_DIR, "xml_entrada", "processados")
+        os.makedirs(pasta_proc, exist_ok=True)
+
         inseridos = 0
         duplicados = 0
         erros = 0
@@ -681,6 +1101,14 @@ class ValidadorExpedicaoApp(tk.Tk):
                     arquivo_xml=nome_arquivo
                 )
 
+                # Copiar para xml_entrada/processados para indexação pelo motor RAG
+                dest_rag = os.path.join(pasta_proc, nome_arquivo)
+                if os.path.abspath(caminho_xml) != os.path.abspath(dest_rag) and not os.path.exists(dest_rag):
+                    try:
+                        shutil.copy2(caminho_xml, dest_rag)
+                    except Exception:
+                        pass
+
                 if foi_inserido:
                     inseridos += 1
                 else:
@@ -689,17 +1117,16 @@ class ValidadorExpedicaoApp(tk.Tk):
                 print(f"Erro ao importar {caminho_xml}: {e}")
                 erros += 1
 
-        msg_result = f"Importação Concluída!\n\n" \
-                     f"✅ Novas notas inseridas: {inseridos}\n" \
-                     f"⚠️ Notas duplicadas no lote: {duplicados}\n"
+        msg_result = f"Importação Concluída!\n\n✅ Novas notas inseridas: {inseridos}\n⚠️ Notas duplicadas no lote: {duplicados}\n"
         if erros > 0:
             msg_result += f"❌ Arquivos inválidos/com erro: {erros}"
 
         messagebox.showinfo("Resultado da Importação", msg_result)
 
         self.carregar_dados_lote_ativo()
+        self.atualizar_aba_rag_documentos()
         self.lbl_feedback.configure(
-            text=f"📂 {inseridos} notas importadas com sucesso para o Lote {lote_ativo['codigo']}!",
+            text=f"📂 {inseridos} notas importadas e indexadas no RAG para o Lote {lote_ativo['codigo']}!",
             bg="#1b4b27",
             fg="#50fa7b"
         )
@@ -718,6 +1145,7 @@ class ValidadorExpedicaoApp(tk.Tk):
 
         novo_lote = database.criar_novo_lote(arquivar_anterior=True)
         self.carregar_dados_lote_ativo()
+        self.atualizar_aba_rag_documentos()
 
         self.lbl_feedback.configure(
             text=f"✨ Novo lote '{novo_lote['codigo']}' ativado com sucesso!",
@@ -737,19 +1165,18 @@ class JanelaAuditoria(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
-        self.title("📜 Auditoria de Lotes & Assistente IA (GPT-4o-mini)")
+        self.title("📜 Auditoria de Lotes & Assistente IA")
         self.geometry("1120x780")
         self.minsize(900, 620)
         self.configure(bg=parent.bg_color)
 
-        self.lotes_dict = {}  # {str_display: lote_id}
+        self.lotes_dict = {}
         self.lote_selecionado_id = None
         self.ia_em_execucao = False
 
         self.criar_interface()
         self.carregar_lotes()
 
-        # Foco na janela modal
         self.transient(parent)
         self.grab_set()
 
@@ -757,7 +1184,6 @@ class JanelaAuditoria(tk.Toplevel):
         container = ttk.Frame(self, style="Main.TFrame")
         container.pack(fill="both", expand=True, padx=15, pady=15)
 
-        # 1. Header com Dropdown de Seleção de Lotes e Botão Exportar CSV
         header_frame = ttk.Frame(container, style="Main.TFrame")
         header_frame.pack(fill="x", pady=(0, 12))
 
@@ -787,7 +1213,6 @@ class JanelaAuditoria(tk.Toplevel):
         )
         btn_csv.pack(side="right")
 
-        # 2. Cards de Estatísticas do Lote Selecionado
         stats_frame = ttk.Frame(container, style="Main.TFrame")
         stats_frame.pack(fill="x", pady=(0, 12))
 
@@ -818,7 +1243,6 @@ class JanelaAuditoria(tk.Toplevel):
         self.lbl_pronto_coleta = tk.Label(card4, text="0", font=("Segoe UI", 16, "bold"), bg=self.parent.card_bg, fg="#50fa7b")
         self.lbl_pronto_coleta.pack(pady=(0, 6))
 
-        # 3. Tabela de Notas com Horários Detalhados
         table_frame = ttk.Frame(container, style="Main.TFrame")
         table_frame.pack(fill="both", expand=True)
 
@@ -865,9 +1289,7 @@ class JanelaAuditoria(tk.Toplevel):
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
 
-        # ==============================================================================
-        # 4. PAINEL DO ASSISTENTE DE AUDITORIA COM IA (GPT-4o-mini)
-        # ==============================================================================
+        # Painel de IA na Janela de Auditoria
         ia_card = tk.Frame(
             container,
             bg=self.parent.card_bg,
@@ -877,19 +1299,18 @@ class JanelaAuditoria(tk.Toplevel):
         )
         ia_card.pack(fill="both", expand=False, pady=(12, 0))
 
-        # Barra superior do Assistente IA + Botões Rápidos
         ia_top = tk.Frame(ia_card, bg=self.parent.card_bg)
         ia_top.pack(fill="x", padx=12, pady=(8, 6))
 
         tk.Label(
             ia_top,
-            text="🤖 Assistente IA de Auditoria (GPT-4o-mini):",
+            text="🤖 Assistente IA de Auditoria do Lote:",
             font=("Segoe UI", 10, "bold"),
             bg=self.parent.card_bg,
             fg="#bd93f9"
         ).pack(side="left")
 
-        btn_ia_status = ttk.Button(
+        ttk.Button(
             ia_top,
             text="📊 Status Geral do Lote",
             style="Primary.TButton",
@@ -897,10 +1318,9 @@ class JanelaAuditoria(tk.Toplevel):
                 "Faça um diagnóstico e status geral completo deste lote: total de notas importadas, "
                 "quantas e quais já foram bipadas, quantas faltam bipar, progresso percentual e se houve alertas."
             )
-        )
-        btn_ia_status.pack(side="right", padx=3)
+        ).pack(side="right", padx=3)
 
-        btn_ia_bipadas = ttk.Button(
+        ttk.Button(
             ia_top,
             text="🟢 Listar Já Bipadas",
             style="Primary.TButton",
@@ -908,10 +1328,9 @@ class JanelaAuditoria(tk.Toplevel):
                 "Liste todas as notas fiscais que JÁ FORAM BIPADAS neste lote, separando entre "
                 "'Em Separação (1º Bip)' e 'Prontas para Coleta (2º Bip)' com seus respectivos horários."
             )
-        )
-        btn_ia_bipadas.pack(side="right", padx=3)
+        ).pack(side="right", padx=3)
 
-        btn_ia_nao_bipadas = ttk.Button(
+        ttk.Button(
             ia_top,
             text="🔴 Listar Não Bipadas",
             style="Primary.TButton",
@@ -919,10 +1338,8 @@ class JanelaAuditoria(tk.Toplevel):
                 "Liste todas as notas fiscais que AINDA NÃO FORAM BIPADAS neste lote (pendentes de 1º bip), "
                 "informando o Nº da NF, chave e data de importação."
             )
-        )
-        btn_ia_nao_bipadas.pack(side="right", padx=3)
+        ).pack(side="right", padx=3)
 
-        # Barra de Pergunta Livre para a IA
         ia_input_frame = tk.Frame(ia_card, bg=self.parent.card_bg)
         ia_input_frame.pack(fill="x", padx=12, pady=(0, 6))
 
@@ -950,7 +1367,6 @@ class JanelaAuditoria(tk.Toplevel):
         )
         self.btn_enviar_ia.pack(side="right")
 
-        # Área de Texto com Scroll para Resposta da IA
         ia_text_frame = tk.Frame(ia_card, bg=self.parent.card_bg)
         ia_text_frame.pack(fill="both", expand=True, padx=12, pady=(0, 10))
 
@@ -1004,7 +1420,7 @@ class JanelaAuditoria(tk.Toplevel):
 
         self.ia_em_execucao = True
         self._escrever_resposta_ia(
-            f"⏳ Consultando o modelo de IA (GPT-4o-mini) para o lote selecionado...\nPergunta: \"{pergunta}\"",
+            f"⏳ Consultando o Agente IA para o lote selecionado...\nPergunta: \"{pergunta}\"",
             cor="#f1fa8c"
         )
 
@@ -1037,7 +1453,7 @@ class JanelaAuditoria(tk.Toplevel):
             dt_fmt = l.get("data_criacao") or "Desconhecido"
             total = l.get("total_pedidos", 0)
             text_combo = f"{l['codigo']}{st_label} - Criado em {dt_fmt} ({total} NFs)"
-            
+
             opcoes.append(text_combo)
             self.lotes_dict[text_combo] = l["id"]
 
@@ -1060,13 +1476,11 @@ class JanelaAuditoria(tk.Toplevel):
         stats = dados["estatisticas"]
         pedidos = dados["pedidos"]
 
-        # Atualizar Cards
         self.lbl_total.configure(text=str(stats["total"]))
         self.lbl_nao_bipadas.configure(text=str(stats["nao_bipados"]))
         self.lbl_em_separacao.configure(text=str(stats["em_separacao"]))
         self.lbl_pronto_coleta.configure(text=str(stats["pronto_coleta"]))
 
-        # Limpar e Preencher Tabela
         children = self.tree.get_children()
         self.tree.delete(*children)
 

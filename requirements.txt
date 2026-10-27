@@ -4,3 +4,5 @@ websockets>=12.0
 watchdog>=4.0.0
 openai>=1.40.0
 python-dotenv>=1.0.1
+pypdf>=4.0.0
+PyPDF2>=3.0.1
