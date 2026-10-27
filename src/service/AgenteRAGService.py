@@ -29,7 +29,10 @@ def _tokenizar(texto: str) -> List[str]:
     stopwords = {
         "o", "a", "os", "as", "de", "da", "do", "das", "dos", "em", "na", "no", "nas", "nos",
         "para", "por", "com", "um", "uma", "que", "qual", "quais", "foi", "foram", "me", "de",
-        "nota", "notas", "nf", "nfe", "fiscal", "fiscais", "sobre", "listar", "liste", "mostre"
+        "nota", "notas", "nf", "nfe", "fiscal", "fiscais", "sobre", "listar", "liste", "mostre",
+        "cliente", "nome", "numero", "produto", "produtos", "item", "itens", "veiculo", "veiculos",
+        "vendido", "vendida", "vendidos", "hora", "horario", "adicionado", "adicionada", "adicao",
+        "pasta", "importacao", "importado", "importada", "retorne", "diga", "fale", "valor"
     }
     tokens = re.findall(r"[a-z0-9]{2,}", norm)
     return [t for t in tokens if t not in stopwords]
@@ -145,6 +148,12 @@ class IndiceRAGNotas:
                 f"Arquivo: {doc['nome_arquivo']} ({doc['tipo_arquivo']})"
             )
 
+            doc["valores_busca"] = (
+                f"{doc['numero_nf']} {doc['chave']} {doc['cliente_nome']} {doc['cliente_doc']} "
+                f"{doc['cliente_cidade_uf']} {doc['cliente_endereco']} {doc['produto_veiculo_vendido']} "
+                f"{doc['valor_total_nf']} {doc['hora_adicionado_pasta']} {doc['nome_arquivo']}"
+            )
+
             docs_indexados[chave] = doc
 
         # 3. Adicionar também pedidos que estejam no SQLite mas cujo XML não esteja mais na pasta
@@ -219,7 +228,7 @@ class IndiceRAGNotas:
         scores = []
         for doc in self.documentos:
             score = 0.0
-            doc_norm = _normalizar_texto(doc["texto_rag"])
+            doc_norm = _normalizar_texto(doc.get("valores_busca") or doc["texto_rag"])
 
             # Boost para match exato de número da NF
             if str(doc["numero_nf"]).lower() in q_norm.split():
